@@ -22,9 +22,8 @@ SC_KIND = {
     "fiber_count": "connectome_streamline_count_10M.csv",
 }
 
-FC_KIND={
-    "rest_timeseries":"",
-    "rest_pcorr_relation": "",
+FC_KIND = {
+    "pcc_rest": "pFC.csv",
 }
 
 SFC_KIND={
@@ -74,11 +73,9 @@ def resolve_conn_filename(modal_type, sub_kind):
         return mapped_name
 
     if modal_type == "FC":
-        if sub_kind.endswith(".csv"):
+        if sub_kind == "pFC.csv":
             return sub_kind
-        if sub_kind.startswith("pFC_"):
-            return f"{sub_kind}.csv"
-        return f"pFC_{sub_kind}.csv"
+        raise ValueError("For FC, sub_kind must be 'pcc_rest' or file name 'pFC.csv'.")
 
     return sub_kind
 
@@ -192,12 +189,15 @@ def load_conn(
     for atlas, kind_to_subj_file in atlas_to_kind_subj_file.items():
         nets[atlas] = {}
         for k in conn_kind:
+            resolved_kind = resolve_conn_filename(conn_type, k)
             mats = []
             subj_to_file = kind_to_subj_file[k]
             for sid in valid_subjids:
                 mat = pd.read_csv(subj_to_file[sid], header=None).values
                 mats.append(mat)
-            nets[atlas][k] = np.stack(mats, axis=0)
+            mats_stack = np.stack(mats, axis=0)
+            nets[atlas][k] = mats_stack
+            nets[atlas][resolved_kind] = mats_stack
 
     return nets, valid_subjids
 
