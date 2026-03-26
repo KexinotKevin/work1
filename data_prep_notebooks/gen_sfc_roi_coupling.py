@@ -238,12 +238,15 @@ def compute_sfc_roi_coupling_dataframe(
     return out_df
 
 
-def build_default_output_csv(dataset_name, atlas_name, sc_kind, fc_kind):
+def build_default_output_csv(dataset_name, atlas_name, sc_kind, fc_kind, scores_path_override=None):
     fname = (
         f"sfc_roi_coupling__dataset_{dataset_name}"
         f"__atlas_{atlas_name}__sc_{sc_kind}__fc_{fc_kind}.csv"
     )
-    return os.path.join(CUR_DIR, fname)
+    dt_cfg = get_dataset_cfg(dataset_name)
+    effective_scores_path = scores_path_override or dt_cfg.get("scores_path", "")
+    out_dir = os.path.dirname(effective_scores_path) if effective_scores_path else CUR_DIR
+    return os.path.join(out_dir, fname)
 
 
 def main():
@@ -265,7 +268,13 @@ def main():
         conn_dir=args.conn_dir,
         scores_path=args.scores_path,
     )
-    out_csv = args.out_csv or build_default_output_csv(args.dataset, args.atlas, args.sc_kind, args.fc_kind)
+    out_csv = args.out_csv or build_default_output_csv(
+        args.dataset,
+        args.atlas,
+        args.sc_kind,
+        args.fc_kind,
+        scores_path_override=args.scores_path,
+    )
     out_df.to_csv(out_csv, index=False)
     print(f"[ok] saved csv: {out_csv}")
     print(f"[ok] subjects: {len(out_df)}, rois: {out_df.shape[1] - 1}")
