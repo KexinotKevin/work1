@@ -12,6 +12,7 @@ from datasets_base import FC_KIND, SC_KIND, SFC_KIND, load_data, normalize_modal
 from datasets_cfg import atlases, get_dataset_cfg
 from edge_selection import haufe_transform, select_sig_edges
 from models import get_regression_model
+from post_interpret import get_edge_contributions_symmetric
 
 
 METHODS = [
@@ -181,21 +182,50 @@ def run_one_dataset(
         haufe_status = "not_supported"
         haufe_error = ""
 
-        if hasattr(fitted_model, "coef_"):
+        if method_cfg["method_type"] == "linear":
+            if hasattr(fitted_model, "coef_"):
+                try:
+                    model_coef = np.asarray(fitted_model.coef_).reshape(-1)
+                    contribution_mat = haufe_transform(train_picked_edges, y, model_coef, num_nodes=num_roi)
+                    haufe_csv = os.path.join(
+                        stats_dir,
+                        f"haufe__{combo_stem}__method_{sanitize_name(method_name)}.csv",
+                    )
+                    pd.DataFrame(contribution_mat).to_csv(haufe_csv, index=False)
+                    haufe_status = "ok"
+                    log_progress(dataset_name, modal_type, sub_kind, pred_label_type, f"haufe saved: {method_name}")
+                except Exception as exc:
+                    haufe_status = "failed"
+                    haufe_error = str(exc)
+                    log_progress(dataset_name, modal_type, sub_kind, pred_label_type, f"haufe failed: {method_name}")
+        else:
             try:
-                model_coef = np.asarray(fitted_model.coef_).reshape(-1)
-                haufe_mat = haufe_transform(train_picked_edges, y, model_coef, num_nodes=num_roi)
+                contribution_mat = get_edge_contributions_symmetric(
+                    fitted_model, X, y, method="permutation"
+                )
                 haufe_csv = os.path.join(
                     stats_dir,
                     f"haufe__{combo_stem}__method_{sanitize_name(method_name)}.csv",
                 )
-                pd.DataFrame(haufe_mat).to_csv(haufe_csv, index=False)
+                pd.DataFrame(contribution_mat).to_csv(haufe_csv, index=False)
                 haufe_status = "ok"
-                log_progress(dataset_name, modal_type, sub_kind, pred_label_type, f"haufe saved: {method_name}")
+                log_progress(
+                    dataset_name,
+                    modal_type,
+                    sub_kind,
+                    pred_label_type,
+                    f"nonlinear contribution saved: {method_name}",
+                )
             except Exception as exc:
                 haufe_status = "failed"
                 haufe_error = str(exc)
-                log_progress(dataset_name, modal_type, sub_kind, pred_label_type, f"haufe failed: {method_name}")
+                log_progress(
+                    dataset_name,
+                    modal_type,
+                    sub_kind,
+                    pred_label_type,
+                    f"nonlinear contribution failed: {method_name}",
+                )
 
         for subj_i in range(num_subj):
             per_subject_rows.append(
