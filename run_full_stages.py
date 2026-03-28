@@ -21,13 +21,14 @@ def main(task_name=None):
     TASK_NAME = 'CogFluidComp_Unadj' if task_name is None else task_name
     ATLASES = ['bna246', 'schaefer200_S1']
     ATLAS_DIR = "/media/shulab/WD_10T/datasets/utils/mergedAtlas/Lin6/"
+
+    # 【核心修改 1】：引入全新的三個演算法分組
+    MODEL_GROUPS = ['linear', 'nonlinear', 'mlp']
     
-    # 【核心修正】：增加外层循环，将线性和非线性完全隔离开
-    MODEL_TYPES = ['linear', 'nonlinear']
-    
-    for model_type in MODEL_TYPES:
+    # 外層循環，將三種不同解釋性框架的結果完全隔離開
+    for model_group in MODEL_GROUPS:
         print(f"\n{'='*60}")
-        print(f"=== 开始执行分支: [{model_type.upper()}] (特征溯源: {'Haufe' if model_type=='linear' else 'SHAP'}) ===")
+        print(f"=== 開始執行全流程計算分支: [{model_group.upper()}] ===")
         print(f"{'='*60}")
         
         all_volumes = []
@@ -42,12 +43,16 @@ def main(task_name=None):
             aligned_atlas_img, _ = load_and_align_atlas(atlas_nifti_path, reference_nifti_path=reference_atlas_path)
             if reference_affine is None: reference_affine = aligned_atlas_img.affine
                 
-            # 调用修正后的函数并传入 model_type
-            weight_matrix, _ = load_model_weights(STATS_DIR, TASK_NAME, DATASET, atlas_name, model_type=model_type)
+            # 【核心修改 2】：參數名改為 model_group=model_group
+            weight_matrix, file_names = load_model_weights(
+                STATS_DIR, TASK_NAME, DATASET, atlas_name, model_group=model_group
+            )
             
             if len(weight_matrix) == 0:
                 continue
-                
+            
+            print(f"     [Stage 1] 圖譜 {atlas_name}: 成功加載 {len(file_names)} 個 {model_group} 模型權重文件。")
+            
             rank_matrix = percentile_rank_transform(weight_matrix)
             stability_scores = calculate_stability_score(rank_matrix)
             nodal_strengths, _ = edge_to_node_mapping(stability_scores, threshold_percentile=0.95)
@@ -56,19 +61,20 @@ def main(task_name=None):
             all_volumes.append(volume_data)
             
         if not all_volumes:
-            print(f"跳过 {model_type} 分析，因为未提取到有效数据。")
+            print(f"⚠️ 跳過 [{model_group.upper()}] 分析，因為未提取到任何有效數據。")
             continue
 
-        # ---------------- Stage 2 后期：GCI 计算 ----------------
+        # ---------------- Stage 2 後期：GCI 計算 ----------------
         gci_volume, confidence_volume = calculate_gci_and_confidence(all_volumes)
         
-        # 【保存修正】：在文件名中显式写入 model_type
+        # 【核心修改 3】：保存檔名使用 model_group 進行隔離
         stage2_out_dir = os.path.join(STATS_DIR, 'Stage2_Results')
         os.makedirs(stage2_out_dir, exist_ok=True)
-        gci_path = os.path.join(stage2_out_dir, f'GCI_{DATASET}_{model_type}_Merged_{len(ATLASES)}Atlases.nii.gz')
+        gci_path = os.path.join(stage2_out_dir, f'GCI_{DATASET}_{model_group}_Merged_{len(ATLASES)}Atlases.nii.gz')
         nib.save(nib.Nifti1Image(gci_volume, reference_affine), gci_path)
+        print(f"     [Stage 2] 跨圖譜融合完成，已保存至: {gci_path}")
         
-        # ---------------- Stage 3：统计推断 ----------------
+        # ---------------- Stage 3：統計推斷 ----------------
         null_distribution = mock_null_distribution()
         fwe_corrected_volume, report = cluster_level_fwe_correction(
             real_gci_volume=gci_volume,
@@ -77,13 +83,14 @@ def main(task_name=None):
             p_val_thresh=0.05
         )
         
-        # 【保存修正】：在文件名中显式写入 model_type
+        # 【核心修改 4】：保存檔名使用 model_group 進行隔離
         stage3_out_dir = os.path.join(STATS_DIR, 'Stage3_Results')
         os.makedirs(stage3_out_dir, exist_ok=True)
-        fwe_path = os.path.join(stage3_out_dir, f'GCI_{DATASET}_{model_type}_FWECorrected.nii.gz')
+        fwe_path = os.path.join(stage3_out_dir, f'GCI_{DATASET}_{model_group}_FWECorrected.nii.gz')
         nib.save(nib.Nifti1Image(fwe_corrected_volume, reference_affine), fwe_path)
+        print(f"     [Stage 3] 統計校正完成，已保存至: {fwe_path}")
         
-        print(f"[{model_type.upper()}] 分支执行完毕，结果已隔离保存。")
+        print(f"✅ [{model_group.upper()}] 分支執行完畢，計算結果已完全隔離並落盤。")
 
 if __name__ == "__main__":
     main()
