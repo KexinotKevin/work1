@@ -4,39 +4,52 @@ import numpy as np
 import pandas as pd
 from scipy.stats import rankdata
 
-def load_model_weights(stats_dir, task, dataset, atlas, model_type='linear'):
+def load_model_weights(stats_dir, task, dataset, atlas, model_group='linear'):
     """
-    【修正版】：根据模型类型，动态加载对应的特征贡献度文件。
-    线性模型加载 'haufe__*.csv'，非线性模型加载 'shap__*.csv'。
+    【最新修正版】：统一读取 haufe 权重文件，并通过文件名中的 method 字段进行精确分组过滤。
     """
-    # 根据模型类型动态决定文件前缀
-    prefix = 'haufe' if model_type == 'linear' else 'shap'
+    # 定义严格的算法分组映射表
+    group_mapping = {
+        'linear': ['lasso', 'ridge', 'linear', 'huber'],
+        'nonlinear': ['kernel_ridge_rbf', 'decision_tree', 'gradient_boosting'],
+        'mlp': ['mlp_regressor']
+    }
     
-    # 构建搜索路径
-    search_pattern = os.path.join(stats_dir, task, f'{prefix}__dataset_{dataset}__atlas_{atlas}__*.csv')
-    file_paths = glob.glob(search_pattern)
-    
-    if not file_paths:
-        print(f"⚠️ 警告: 未找到匹配的 {model_type} 模型文件 ({prefix}前缀): {search_pattern}")
+    allowed_methods = group_mapping.get(model_group, [])
+    if not allowed_methods:
+        print(f"⚠️ 未知的模型分组: {model_group}")
         return np.array([]), []
         
+    # 统一抓取所有 haufe 文件
+    search_pattern = os.path.join(stats_dir, task, f'haufe__dataset_{dataset}__atlas_{atlas}__*.csv')
+    all_file_paths = glob.glob(search_pattern)
+    
     weights_list = []
     file_names = []
     
-    for fpath in file_paths:
-        df = pd.read_csv(fpath)
-        if 'Unnamed: 0' in df.columns:
-            df = df.drop(columns=['Unnamed: 0'])
+    for fpath in all_file_paths:
+        fname = os.path.basename(fpath)
+        
+        # 精确匹配 method 字段：检查文件名中是否包含 "__method_算法名.csv"
+        is_match = any(f"__method_{m}.csv" in fname for m in allowed_methods)
+        
+        if is_match:
+            df = pd.read_csv(fpath)
+            if 'Unnamed: 0' in df.columns:
+                df = df.drop(columns=['Unnamed: 0'])
+                
+            vals = df.values
+            if vals.ndim == 2 and vals.shape[0] == vals.shape[1]:
+                iu = np.triu_indices(vals.shape[0], k=1)
+                vec = vals[iu]
+            else:
+                vec = vals.flatten()
+                
+            weights_list.append(vec)
+            file_names.append(fname)
             
-        vals = df.values
-        if vals.ndim == 2 and vals.shape[0] == vals.shape[1]:
-            iu = np.triu_indices(vals.shape[0], k=1)
-            vec = vals[iu]
-        else:
-            vec = vals.flatten()
-            
-        weights_list.append(vec)
-        file_names.append(os.path.basename(fpath))
+    if not file_names:
+        print(f"   (提示: 当前配置下未找到属于 [{model_group}] 组的有效文件)")
         
     return np.array(weights_list), file_names
 
