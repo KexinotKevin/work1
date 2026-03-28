@@ -7,16 +7,6 @@ from scipy.stats import rankdata
 def load_haufe_weights(stats_dir, task, dataset, atlas):
     """
     读取特定认知任务、数据集和脑分区下，所有模态和模型的 Haufe 权重文件。
-    
-    参数:
-        stats_dir (str): stats 目录的根路径，如 './stats'
-        task (str): 认知任务文件夹名称，如 'CogFluidComp_Unadj'
-        dataset (str): 数据集名称，如 'S1200'
-        atlas (str): 分区方案名称，如 'bna246'
-        
-    返回:
-        weight_matrix (np.ndarray): 形状为 (K, D) 的矩阵，K 为文件(模态/模型)数量，D 为连接边数量。
-        file_names (list): 对应的文件名称列表，方便溯源。
     """
     search_pattern = os.path.join(stats_dir, task, f'haufe__dataset_{dataset}__atlas_{atlas}__*.csv')
     file_paths = glob.glob(search_pattern)
@@ -28,11 +18,16 @@ def load_haufe_weights(stats_dir, task, dataset, atlas):
     file_names = []
     
     for fpath in file_paths:
-        # 读取 CSV，假设没有表头
-        df = pd.read_csv(fpath, header=None)
+        # 【修改点 1】：去掉 header=None，让 pandas 自动消耗掉 '0,1,2...' 这样的首行表头
+        df = pd.read_csv(fpath)
+        
+        # 【修改点 2】：鲁棒性处理。如果保存时误用了 index=True，会生成一个名为 'Unnamed: 0' 的索引列，需剔除
+        if 'Unnamed: 0' in df.columns:
+            df = df.drop(columns=['Unnamed: 0'])
+            
         vals = df.values
         
-        # 兼容处理：如果保存的是 NxN 对称矩阵，提取上三角一维向量；如果是已经是 1D 向量则直接铺平
+        # 兼容处理：此时如果是 246 脑区，vals 形状应当完美恢复为 (246, 246)
         if vals.ndim == 2 and vals.shape[0] == vals.shape[1]:
             # 提取上三角索引 (k=1 排除对角线自身连接)
             iu = np.triu_indices(vals.shape[0], k=1)
