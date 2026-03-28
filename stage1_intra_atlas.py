@@ -4,32 +4,32 @@ import numpy as np
 import pandas as pd
 from scipy.stats import rankdata
 
-def load_haufe_weights(stats_dir, task, dataset, atlas):
+def load_model_weights(stats_dir, task, dataset, atlas, model_type='linear'):
     """
-    读取特定认知任务、数据集和脑分区下，所有模态和模型的 Haufe 权重文件。
+    【修正版】：根据模型类型，动态加载对应的特征贡献度文件。
+    线性模型加载 'haufe__*.csv'，非线性模型加载 'shap__*.csv'。
     """
-    search_pattern = os.path.join(stats_dir, task, f'haufe__dataset_{dataset}__atlas_{atlas}__*.csv')
+    # 根据模型类型动态决定文件前缀
+    prefix = 'haufe' if model_type == 'linear' else 'shap'
+    
+    # 构建搜索路径
+    search_pattern = os.path.join(stats_dir, task, f'{prefix}__dataset_{dataset}__atlas_{atlas}__*.csv')
     file_paths = glob.glob(search_pattern)
     
     if not file_paths:
-        raise ValueError(f"未找到匹配的文件: {search_pattern}")
+        print(f"⚠️ 警告: 未找到匹配的 {model_type} 模型文件 ({prefix}前缀): {search_pattern}")
+        return np.array([]), []
         
     weights_list = []
     file_names = []
     
     for fpath in file_paths:
-        # 【修改点 1】：去掉 header=None，让 pandas 自动消耗掉 '0,1,2...' 这样的首行表头
         df = pd.read_csv(fpath)
-        
-        # 【修改点 2】：鲁棒性处理。如果保存时误用了 index=True，会生成一个名为 'Unnamed: 0' 的索引列，需剔除
         if 'Unnamed: 0' in df.columns:
             df = df.drop(columns=['Unnamed: 0'])
             
         vals = df.values
-        
-        # 兼容处理：此时如果是 246 脑区，vals 形状应当完美恢复为 (246, 246)
         if vals.ndim == 2 and vals.shape[0] == vals.shape[1]:
-            # 提取上三角索引 (k=1 排除对角线自身连接)
             iu = np.triu_indices(vals.shape[0], k=1)
             vec = vals[iu]
         else:
