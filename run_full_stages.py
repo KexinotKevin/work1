@@ -68,7 +68,7 @@ def main(task_name=None):
         gci_volume, confidence_volume = calculate_gci_and_confidence(all_volumes)
         
         # 【核心修改 3】：保存檔名使用 model_group 進行隔離
-        stage2_out_dir = os.path.join(STATS_DIR, 'Stage2_Results')
+        stage2_out_dir = os.path.join(STATS_DIR, TASK_NAME, 'Stage2_Results')
         os.makedirs(stage2_out_dir, exist_ok=True)
         gci_path = os.path.join(stage2_out_dir, f'GCI_{DATASET}_{model_group}_Merged_{len(ATLASES)}Atlases.nii.gz')
         nib.save(nib.Nifti1Image(gci_volume, reference_affine), gci_path)
@@ -84,7 +84,7 @@ def main(task_name=None):
         )
         
         # 【核心修改 4】：保存檔名使用 model_group 進行隔離
-        stage3_out_dir = os.path.join(STATS_DIR, 'Stage3_Results')
+        stage3_out_dir = os.path.join(STATS_DIR, TASK_NAME, 'Stage3_Results')
         os.makedirs(stage3_out_dir, exist_ok=True)
         fwe_path = os.path.join(stage3_out_dir, f'GCI_{DATASET}_{model_group}_FWECorrected.nii.gz')
         nib.save(nib.Nifti1Image(fwe_corrected_volume, reference_affine), fwe_path)

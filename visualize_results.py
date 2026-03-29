@@ -37,9 +37,10 @@ def mock_null_distribution(num_permutations=10000):
 def main(task_name=None):
     # ---------- 全局配置 ----------
     DATASET = 'S1200'
-    STATS_DIR = f'./res_{DATASET}/stats'
-    PICS_DIR = f'./res_{DATASET}/pics/Stage_Results_Vis'
     TASK_NAME = 'CogFluidComp_Unadj' if task_name is None else task_name
+    STATS_DIR = f'./res_{DATASET}/stats'
+    PICS_DIR = f'./res_{DATASET}/pics/{TASK_NAME}/Stage_Results_Vis'
+    
     ATLASES = ['bna246', 'schaefer200_S1']
     ATLAS_DIR = "/media/shulab/WD_10T/datasets/utils/mergedAtlas/Lin6/"
     
@@ -80,16 +81,17 @@ def main(task_name=None):
             stability_scores = calculate_stability_score(rank_matrix)
             
             # 【需求 1】 Connectome (10%, 30%, 50%)
-            for pct_label, pct_val in [('10pct', 0.90), ('30pct', 0.70), ('50pct', 0.50)]:
-                adj_matrix = build_adjacency_matrix(stability_scores, threshold_percentile=pct_val)
-                draw_connectome(
-                    adjacency_matrix=adj_matrix,
-                    atlas_img=atlas_nifti_path,
-                    edge_threshold="0%", 
-                    title=f"{model_group.capitalize()} Connectome (Top {pct_label}) - {atlas_name}",
-                    save_dir=PICS_DIR,
-                    filename=f"Req1_Connectome_{model_group}_{atlas_name}_top{pct_label}.png"
-                )
+            # 更新：只绘制1%的连边
+            # for pct_label, pct_val in [('10pct', 0.90), ('30pct', 0.70), ('50pct', 0.50)]:
+            adj_matrix = build_adjacency_matrix(stability_scores, threshold_percentile=pct_val)
+            draw_connectome(
+                adjacency_matrix=adj_matrix,
+                atlas_img=atlas_nifti_path,
+                edge_threshold="99%", 
+                # title=f"{model_group.capitalize()} Connectome (Top {pct_label}) - {atlas_name}",
+                save_dir=PICS_DIR,
+                filename=f"Req1_Connectome_{model_group}_{atlas_name}_top0.01.png"
+            )
             
             # 【需求 2】 Stage 1 ROI (聚合前 5% 连边)
             nodal_strengths, _ = edge_to_node_mapping(stability_scores, threshold_percentile=0.95)

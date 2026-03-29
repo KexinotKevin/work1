@@ -110,7 +110,7 @@ def style_colorbar(cbar, label=None, ticks=None, tick_format=None):
         cbar.update_ticks()
     if ticks is not None:
         ticklabels = [tick_format % tick if tick_format is not None else str(tick) for tick in ticks]
-        axis = cbar.ax.xaxis if getattr(cbar, "orientation", "vertical") == "horizontal" else cbar.ax.yaxis
+        axis = cbar.ax.xaxis if getattr(cbar, "orientation", "horizontal") == "horizontal" else cbar.ax.yaxis
         axis.set_major_locator(FixedLocator(ticks))
         axis.set_minor_locator(NullLocator())
         axis.set_ticks(ticks)
@@ -119,11 +119,30 @@ def style_colorbar(cbar, label=None, ticks=None, tick_format=None):
     cbar.ax.tick_params(labelsize=STYLE["tick_size"], width=STYLE["spine_width"])
     for spine in cbar.ax.spines.values():
         spine.set_linewidth(STYLE["spine_width"])
+    # 只显示最大值和最小值刻度
+    if ticks is not None and len(ticks) >= 2:
+        min_tick = ticks[0]
+        max_tick = ticks[-1]
+        if getattr(cbar, "orientation", "vertical") == "horizontal":
+            cbar.ax.set_xticks([min_tick, max_tick])
+            cbar.ax.set_xticklabels([tick_format % min_tick if tick_format else str(min_tick),
+                                      tick_format % max_tick if tick_format else str(max_tick)])
+            cbar.ax.set_yticks([])
+        else:
+            cbar.ax.set_yticks([min_tick, max_tick])
+            cbar.ax.set_yticklabels([tick_format % min_tick if tick_format else str(min_tick),
+                                      tick_format % max_tick if tick_format else str(max_tick)])
+            cbar.ax.set_xticks([])
+        cbar.ax.minorticks_off()
 
 
 def force_colorbar_end_ticks(cbar, ticks, tick_format="%.3f"):
     if ticks is None:
         return
+
+    # 只取最大值和最小值
+    if len(ticks) >= 2:
+        ticks = [ticks[0], ticks[-1]]
 
     ticklabels = [tick_format % tick for tick in ticks]
     cbar.set_ticks(ticks)

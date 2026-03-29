@@ -269,7 +269,13 @@ def draw_heatmap(mat, save_dir=None, show=True):
     if ax.collections:
         cbar = ax.collections[0].colorbar
         if cbar is not None:
-            style_colorbar(cbar)
+            vmin = color_kwargs.get("vmin")
+            vmax = color_kwargs.get("vmax")
+            if vmin is not None and vmax is not None:
+                ticks = [vmin, vmax]
+                style_colorbar(cbar, ticks=ticks, tick_format="%.3f")
+            else:
+                style_colorbar(cbar)
 
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
