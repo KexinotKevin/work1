@@ -12,7 +12,7 @@ def load_model_weights(stats_dir, task, dataset, atlas, model_group='linear'):
     group_mapping = {
         'linear': ['lasso', 'ridge', 'linear', 'huber'],
         'nonlinear': ['kernel_ridge_rbf', 'decision_tree', 'gradient_boosting'],
-        'mlp': ['mlp_regressor']
+        'mlp': ['single_layer_mlp']
     }
     
     allowed_methods = group_mapping.get(model_group, [])
