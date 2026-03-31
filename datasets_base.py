@@ -1,10 +1,41 @@
 import os
+from collections import Counter
+
 import numpy as np
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor
 
 from datasets_cfg import get_dataset_cfg
 
 std_names = ['subject_id','gender','age']
+
+
+def normalize_subject_id(sid, dataset_name=None):
+    """
+    标准化 subject ID：将各种可能的 NDAR ID 格式统一为 CSV 中的原始格式。
+    ABCD 的 scores CSV 使用 "NDAR_INV..." 格式，而 network 目录使用 "NDARINV..." 格式。
+    """
+    s = str(sid)
+    if dataset_name == "ABCD":
+        s = s.replace("NDARINV", "NDAR_INV")
+    return s
+
+
+def _normalize_subject_ids(subjids, dataset_name=None):
+    """将 subject IDs 标准化为 CSV 中的原始格式（用于 scores 匹配）。"""
+    return [normalize_subject_id(s, dataset_name) for s in subjids]
+
+
+def _denormalize_subject_ids(subjids, dataset_name=None):
+    """将 subject IDs 反标准化为 network 目录中的格式（用于文件路径查找）。"""
+    result = []
+    for sid in subjids:
+        s = str(sid)
+        if dataset_name == "ABCD":
+            s = s.replace("NDAR_INV", "NDARINV")
+        result.append(s)
+    return result
+
 
 """
 dataset_cfg[dataset_type] = {
@@ -25,6 +56,27 @@ SC_KIND = {
 FC_KIND = {
     "pcc_rest": "pFC.csv",
 }
+
+FC_CONN_MASK = {
+    "pcc_rest_pos": "positive connections only",
+    "pcc_rest_neg": "negative connections only",
+}
+
+
+def _apply_fc_conn_mask(mats_stack, sub_kind):
+    """对 FC 矩阵应用掩码：仅保留正连接或仅保留负连接。"""
+    if not isinstance(mats_stack, np.ndarray) or mats_stack.ndim != 3:
+        raise ValueError(f"Expected 3D array for FC matrices, got shape {mats_stack.shape if isinstance(mats_stack, np.ndarray) else type(mats_stack)}")
+
+    if sub_kind.endswith("_pos"):
+        masked = np.where(mats_stack > 0, mats_stack, 0)
+        print(f"  [mask] Applied positive-only mask: {mats_stack.shape}")
+    elif sub_kind.endswith("_neg"):
+        masked = np.where(mats_stack < 0, mats_stack, 0)
+        print(f"  [mask] Applied negative-only mask: {mats_stack.shape}")
+    else:
+        masked = mats_stack
+    return masked
 
 SFC_KIND={
     "sc_roi_fitted": "",
@@ -67,6 +119,10 @@ def resolve_conn_filename(modal_type, sub_kind):
     if not sub_kind:
         raise ValueError("sub_kind must be non-empty.")
 
+    if modal_type == "FC":
+        if sub_kind in FC_CONN_MASK:
+            return resolve_conn_filename("FC", sub_kind.rsplit("_pos", 1)[0].rsplit("_neg", 1)[0])
+
     kind_map = VALID_TYPE_TO_KIND[modal_type]
     mapped_name = kind_map.get(sub_kind, "")
     if mapped_name:
@@ -108,29 +164,32 @@ def load_data(
     modal_type = normalize_modal_type(modal_type)
 
     scores = load_scores(dataset_name, dt_cfg)
-    scores = scores[std_names+dt_cfg["tgt_label_list"][3:]]
+    scores = scores[std_names + dt_cfg["tgt_label_list"][3:]]
     scores = scores.sort_values(by="subject_id")
     scores["subject_id"] = scores["subject_id"].astype(str)
     subjids = scores["subject_id"].astype(str).tolist()
     subjids.sort()
-    
-    # 快速验证
+
     assert len(scores) == len(subjids), "长度不一致"
     assert set(scores['subject_id'].astype(str)) == set(subjids), "内容不一致"
     assert scores['subject_id'].astype(str).tolist() == subjids, "顺序不一致"
     print("✓ 验证通过")
 
-    nets, valid_subjids = load_conn(
-        subjids=subjids,
+    # Denormalize for directory matching (ABCD uses NDARINV without underscore)
+    net_subjids = _denormalize_subject_ids(subjids, dataset_name)
+
+    nets, valid_net_subjids = load_conn(
+        subjids=net_subjids,
         conn_dir=conn_dir,
         atlas_name=atlas_names,
         conn_type=modal_type,
         conn_kind=sub_kinds,
     )
 
+    # Re-normalize for scores matching, then filter scores
+    valid_subjids = _normalize_subject_ids(valid_net_subjids, dataset_name)
     scores = scores[scores["subject_id"].isin(valid_subjids)].copy()
     scores["subject_id"] = scores["subject_id"].astype(str)
-    # scores = scores.set_index("subject_id").loc[valid_subjids].reset_index()
 
     return {"scores": scores, "nets": nets}
 
@@ -185,21 +244,63 @@ def load_conn(
     if not valid_subjids:
         raise ValueError("No subject has all requested atlas/kind files.")
 
+    current_valid = list(valid_subjids)
     nets = {}
+
+    def _subset_all_nets(old_order, new_order):
+        if len(new_order) == len(old_order) and new_order == old_order:
+            return
+        keep_idx = [old_order.index(s) for s in new_order]
+        for atlas in list(nets.keys()):
+            replaced = {}
+            for kk in list(nets[atlas].keys()):
+                arr = nets[atlas][kk]
+                if not isinstance(arr, np.ndarray) or arr.ndim != 3:
+                    continue
+                oid = id(arr)
+                if oid in replaced:
+                    nets[atlas][kk] = replaced[oid]
+                else:
+                    new_arr = arr[keep_idx]
+                    replaced[oid] = new_arr
+                    nets[atlas][kk] = new_arr
+
     for atlas, kind_to_subj_file in atlas_to_kind_subj_file.items():
         nets[atlas] = {}
         for k in conn_kind:
             resolved_kind = resolve_conn_filename(conn_type, k)
-            mats = []
             subj_to_file = kind_to_subj_file[k]
-            for sid in valid_subjids:
-                mat = pd.read_csv(subj_to_file[sid], header=None).values
-                mats.append(mat)
+
+            def _read_csv(sid):
+                return pd.read_csv(subj_to_file[sid], header=None).values
+
+            with ThreadPoolExecutor(max_workers=min(32, len(current_valid))) as pool:
+                mats = list(pool.map(_read_csv, current_valid))
+
+            shape_counts = Counter(tuple(m.shape) for m in mats)
+            if len(shape_counts) > 1:
+                mode_shape = shape_counts.most_common(1)[0][0]
+                kept = [(sid, m) for sid, m in zip(current_valid, mats) if tuple(m.shape) == mode_shape]
+                old_order = current_valid
+                current_valid = [p[0] for p in kept]
+                mats = [p[1] for p in kept]
+                _subset_all_nets(old_order, current_valid)
+            if not mats:
+                raise ValueError(
+                    f"No connectivity matrices left after shape filter for atlas={atlas} kind={k}. "
+                    f"Shapes seen: {dict(shape_counts)}"
+                )
+
             mats_stack = np.stack(mats, axis=0)
+            if conn_type == "FC" and k in FC_CONN_MASK:
+                mats_stack = _apply_fc_conn_mask(mats_stack, k)
             nets[atlas][k] = mats_stack
             nets[atlas][resolved_kind] = mats_stack
 
-    return nets, valid_subjids
+    if not current_valid:
+        raise ValueError("No subject left after connectivity matrix shape alignment.")
+
+    return nets, current_valid
 
 def load_scores(dt_name, dt_cfg):
     scores_path = dt_cfg.get("scores_path", "")

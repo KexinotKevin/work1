@@ -6,7 +6,11 @@ from scipy.stats import rankdata
 
 def load_model_weights(stats_dir, task, dataset, atlas, model_group='linear'):
     """
-    【最新修正版】：统一读取 haufe 权重文件，并通过文件名中的 method 字段进行精确分组过滤。
+    【最新修正版】：统一读取 Haufe/permutation 权重文件，并通过文件名中的 method 字段进行精确分组过滤。
+
+    目录结构:
+    - res_{dataset}/{atlas}/stats/{task}/haufe__label_{label}__dataset_*__atlas_*__modality_*__type_*.csv  (线性模型)
+    - res_{dataset}/{atlas}/permutation/{task}/permutation__label_{label}__dataset_*__atlas_*__modality_*__type_*.csv  (非线性模型)
     """
     # 定义严格的算法分组映射表
     group_mapping = {
@@ -14,43 +18,81 @@ def load_model_weights(stats_dir, task, dataset, atlas, model_group='linear'):
         'nonlinear': ['kernel_ridge_rbf', 'decision_tree', 'gradient_boosting'],
         'mlp': ['single_layer_mlp']
     }
-    
+
     allowed_methods = group_mapping.get(model_group, [])
     if not allowed_methods:
         print(f"⚠️ 未知的模型分组: {model_group}")
         return np.array([]), []
-        
-    # 统一抓取所有 haufe 文件
-    search_pattern = os.path.join(stats_dir, task, f'haufe__dataset_{dataset}__atlas_{atlas}__*.csv')
-    all_file_paths = glob.glob(search_pattern)
-    
+
+    # 新的目录结构: res_{dataset}/{atlas}/{type}/{task}/
+    atlas_dir = os.path.join(stats_dir, "..")  # 回到 res_{dataset}/{atlas} 目录
+
     weights_list = []
     file_names = []
-    
-    for fpath in all_file_paths:
-        fname = os.path.basename(fpath)
-        
-        # 精确匹配 method 字段：检查文件名中是否包含 "__method_算法名.csv"
-        is_match = any(f"__method_{m}.csv" in fname for m in allowed_methods)
-        
-        if is_match:
-            df = pd.read_csv(fpath)
-            if 'Unnamed: 0' in df.columns:
-                df = df.drop(columns=['Unnamed: 0'])
-                
-            vals = df.values
-            if vals.ndim == 2 and vals.shape[0] == vals.shape[1]:
-                iu = np.triu_indices(vals.shape[0], k=1)
-                vec = vals[iu]
-            else:
-                vec = vals.flatten()
-                
-            weights_list.append(vec)
-            file_names.append(fname)
-            
+
+    # 线性模型使用 haufe 文件（在 stats 目录下）
+    # 匹配: haufe__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*.csv
+    if model_group == 'linear':
+        search_pattern = os.path.join(
+            atlas_dir, "stats", task,
+            f'haufe__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*__method_*.csv'
+        )
+        all_file_paths = glob.glob(search_pattern)
+
+        for fpath in all_file_paths:
+            fname = os.path.basename(fpath)
+
+            # 精确匹配 method 字段：检查文件名中是否包含 "__method_算法名.csv"
+            is_match = any(f"__method_{m}.csv" in fname for m in allowed_methods)
+
+            if is_match:
+                df = pd.read_csv(fpath)
+                if 'Unnamed: 0' in df.columns:
+                    df = df.drop(columns=['Unnamed: 0'])
+
+                vals = df.values
+                if vals.ndim == 2 and vals.shape[0] == vals.shape[1]:
+                    iu = np.triu_indices(vals.shape[0], k=1)
+                    vec = vals[iu]
+                else:
+                    vec = vals.flatten()
+
+                weights_list.append(vec)
+                file_names.append(fname)
+
+    # 非线性模型使用 permutation 文件（在 permutation 目录下）
+    # 匹配: permutation__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*.csv
+    elif model_group in ('nonlinear', 'mlp'):
+        search_pattern = os.path.join(
+            atlas_dir, "permutation", task,
+            f'permutation__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*__method_*.csv'
+        )
+        all_file_paths = glob.glob(search_pattern)
+
+        for fpath in all_file_paths:
+            fname = os.path.basename(fpath)
+
+            # 精确匹配 method 字段
+            is_match = any(f"__method_{m}.csv" in fname for m in allowed_methods)
+
+            if is_match:
+                df = pd.read_csv(fpath)
+                if 'Unnamed: 0' in df.columns:
+                    df = df.drop(columns=['Unnamed: 0'])
+
+                vals = df.values
+                if vals.ndim == 2 and vals.shape[0] == vals.shape[1]:
+                    iu = np.triu_indices(vals.shape[0], k=1)
+                    vec = vals[iu]
+                else:
+                    vec = vals.flatten()
+
+                weights_list.append(vec)
+                file_names.append(fname)
+
     if not file_names:
         print(f"   (提示: 当前配置下未找到属于 [{model_group}] 组的有效文件)")
-        
+
     return np.array(weights_list), file_names
 
 def percentile_rank_transform(weight_matrix):

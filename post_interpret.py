@@ -1,8 +1,15 @@
+# #region agent debug logs (optional; never fail if log path is unavailable)
+import os
+import json
+import time
+
+# #endregion
+
 import numpy as np
 import argparse
 try:
     import shap
-except ImportError:  # pragma: no cover - optional dependency for SHAP mode
+except ImportError:
     shap = None
 from sklearn.inspection import permutation_importance
 from sklearn.ensemble import GradientBoostingRegressor
@@ -37,7 +44,7 @@ def get_edge_contributions_symmetric(model, X_data, y_data, method='shap'):
         
     elif method == 'permutation':
         result = permutation_importance(
-            model, X_data, y_data, n_repeats=5, random_state=42, n_jobs=1
+            model, X_data, y_data, n_repeats=5, random_state=42, n_jobs=-1
         )
         global_importances = result.importances_mean
         

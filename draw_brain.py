@@ -96,7 +96,7 @@ def draw_connectome(
     node_size=18,
     title="Brain Connectome",
     save_dir=None,
-    filename="connectome.png",
+    filename="connectome.pdf",
     edge_vmin=None,
     edge_vmax=None,
     node_color="auto",
@@ -146,7 +146,7 @@ def draw_atlas_roi(
     display_mode="ortho",
     cbar_tick_format="%.3f",
     save_dir=None,
-    filename="atlas_roi.png",
+    filename="atlas_roi.pdf",
 ):
     atlas_img = _load_img(atlas_img)
     atlas_data = atlas_img.get_fdata()
@@ -279,7 +279,7 @@ def draw_heatmap(mat, save_dir=None, show=True):
 
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, "heatmap.png")
+        save_path = os.path.join(save_dir, "heatmap.pdf")
         ax.figure.savefig(save_path, dpi=600, bbox_inches="tight")
 
     if show:

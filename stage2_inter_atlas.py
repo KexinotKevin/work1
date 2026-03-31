@@ -30,7 +30,8 @@ def load_and_align_atlas(atlas_nifti_path, reference_nifti_path=None):
             atlas_img = resample_to_img(
                 source_img=atlas_img, 
                 target_img=ref_img, 
-                interpolation="nearest"
+                interpolation="nearest",
+                force_resample=True,
             )
             
             # 2. 计算宏观不确定性衡量值：Dice 分数

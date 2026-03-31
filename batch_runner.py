@@ -7,7 +7,6 @@ from sklearn.base import clone
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold, cross_val_predict
 
-import edge_selection
 from datasets_base import FC_KIND, SC_KIND, SFC_KIND, load_data, normalize_modal_type
 from datasets_cfg import atlases, get_dataset_cfg
 from edge_selection import haufe_transform, select_sig_edges
@@ -65,22 +64,38 @@ def normalize_atlas_name(atlas_name):
     )
 
 
-def build_combo_stem(dataset_name, atlas_name, modal_type, sub_kind):
-    return (
+def build_combo_stem(dataset_name, atlas_name, modal_type, sub_kind, label_name=None):
+    stem = (
         f"dataset_{sanitize_name(dataset_name)}__"
         f"atlas_{sanitize_name(atlas_name)}__"
         f"modality_{sanitize_name(modal_type)}__"
         f"type_{sanitize_name(sub_kind)}"
     )
+    if label_name:
+        stem = f"label_{sanitize_name(label_name)}__{stem}"
+    return stem
 
 
-def get_label_dirs(base_out_dir, label_name):
+def get_label_dirs(base_out_dir, atlas_name, label_name):
+    """Create per-atlas, per-label directory structure for different data types."""
     label_dir_name = sanitize_name(label_name)
-    stats_dir = os.path.join(base_out_dir, "stats", label_dir_name)
-    pics_dir = os.path.join(base_out_dir, "pics", label_dir_name)
-    os.makedirs(stats_dir, exist_ok=True)
-    os.makedirs(pics_dir, exist_ok=True)
-    return stats_dir, pics_dir
+    atlas_dir_name = sanitize_name(atlas_name)
+
+    # Main output: res_{dataset}/{atlas}/
+    atlas_base = os.path.join(base_out_dir, atlas_dir_name)
+
+    # Subdirectories for different data types
+    stats_dir = os.path.join(atlas_base, "stats", label_dir_name)
+    pred_dir = os.path.join(atlas_base, "pred", label_dir_name)
+    shap_dir = os.path.join(atlas_base, "shap", label_dir_name)
+    permutation_dir = os.path.join(atlas_base, "permutation", label_dir_name)
+    pics_dir = os.path.join(atlas_base, "pics", label_dir_name)
+
+    # Create all directories
+    for directory in [stats_dir, pred_dir, shap_dir, permutation_dir, pics_dir]:
+        os.makedirs(directory, exist_ok=True)
+
+    return stats_dir, pred_dir, shap_dir, permutation_dir, pics_dir
 
 
 def log_progress(dataset_name, modal_type, sub_kind, label_name, stage):
@@ -99,9 +114,18 @@ def get_modality_kind_map(modal_type):
     return MODALITY_KIND_MAP[modal_type]
 
 
-def load_existing_combo(stats_dir, combo_stem):
-    pred_csv = os.path.join(stats_dir, f"pred__{combo_stem}.csv")
+def load_existing_combo(base_out_dir, atlas_name, label_name, combo_stem):
+    """Check if pred and summary CSV files exist for a given combo."""
+    atlas_dir_name = sanitize_name(atlas_name)
+    label_dir_name = sanitize_name(label_name)
+
+    atlas_base = os.path.join(base_out_dir, atlas_dir_name)
+    pred_dir = os.path.join(atlas_base, "pred", label_dir_name)
+    stats_dir = os.path.join(atlas_base, "stats", label_dir_name)
+
+    pred_csv = os.path.join(pred_dir, f"pred__{combo_stem}.csv")
     summary_csv = os.path.join(stats_dir, f"summary__{combo_stem}.csv")
+
     if os.path.exists(pred_csv) and os.path.exists(summary_csv):
         return pd.read_csv(pred_csv), pd.read_csv(summary_csv)
     return None, None
@@ -135,10 +159,14 @@ def run_one_dataset(
 ):
     atlas_name = normalize_atlas_name(atlas_name)
     modal_type = normalize_modal_type(modal_type)
-    combo_stem = build_combo_stem(dataset_name, atlas_name, modal_type, sub_kind)
-    stats_dir, _pics_dir = get_label_dirs(base_out_dir, pred_label_type)
+    combo_stem = build_combo_stem(dataset_name, atlas_name, modal_type, sub_kind, pred_label_type)
+    stats_dir, pred_dir, shap_dir, permutation_dir, _pics_dir = get_label_dirs(
+        base_out_dir, atlas_name, pred_label_type
+    )
 
-    existing_pred_df, existing_summary_df = load_existing_combo(stats_dir, combo_stem)
+    existing_pred_df, existing_summary_df = load_existing_combo(
+        base_out_dir, atlas_name, pred_label_type, combo_stem
+    )
     if existing_pred_df is not None and existing_summary_df is not None:
         log_progress(dataset_name, modal_type, sub_kind, pred_label_type, "skip existing csv")
         return existing_pred_df, existing_summary_df
@@ -153,7 +181,6 @@ def run_one_dataset(
             f"Number of subjects ({num_subj}) is smaller than n_splits ({n_splits})."
         )
 
-    edge_selection.pcorr_res = np.zeros((num_roi, num_roi, 2), dtype=float)
     train_picked_edges = select_sig_edges(labels, edges_roi_roi_subj, num_roi, measurement="pcorr")
     X = train_picked_edges.T
     y = labels.astype(float)
@@ -178,53 +205,53 @@ def run_one_dataset(
         fitted_model = clone(base_model)
         fitted_model.fit(X, y)
 
-        haufe_csv = ""
-        haufe_status = "not_supported"
-        haufe_error = ""
+        interpret_csv = ""
+        interpret_status = "not_supported"
+        interpret_error = ""
 
         if method_cfg["method_type"] == "linear":
             if hasattr(fitted_model, "coef_"):
                 try:
                     model_coef = np.asarray(fitted_model.coef_).reshape(-1)
                     contribution_mat = haufe_transform(train_picked_edges, y, model_coef, num_nodes=num_roi)
-                    haufe_csv = os.path.join(
+                    interpret_csv = os.path.join(
                         stats_dir,
                         f"haufe__{combo_stem}__method_{sanitize_name(method_name)}.csv",
                     )
-                    pd.DataFrame(contribution_mat).to_csv(haufe_csv, index=False)
-                    haufe_status = "ok"
+                    pd.DataFrame(contribution_mat).to_csv(interpret_csv, index=False)
+                    interpret_status = "ok"
                     log_progress(dataset_name, modal_type, sub_kind, pred_label_type, f"haufe saved: {method_name}")
                 except Exception as exc:
-                    haufe_status = "failed"
-                    haufe_error = str(exc)
+                    interpret_status = "failed"
+                    interpret_error = str(exc)
                     log_progress(dataset_name, modal_type, sub_kind, pred_label_type, f"haufe failed: {method_name}")
         else:
             try:
                 contribution_mat = get_edge_contributions_symmetric(
-                    fitted_model, X, y, method="permutation"
+                    fitted_model, X, y, method="shap"
                 )
-                haufe_csv = os.path.join(
-                    stats_dir,
-                    f"haufe__{combo_stem}__method_{sanitize_name(method_name)}.csv",
+                interpret_csv = os.path.join(
+                    shap_dir,
+                    f"shap__{combo_stem}__method_{sanitize_name(method_name)}.csv",
                 )
-                pd.DataFrame(contribution_mat).to_csv(haufe_csv, index=False)
-                haufe_status = "ok"
+                pd.DataFrame(contribution_mat).to_csv(interpret_csv, index=False)
+                interpret_status = "ok"
                 log_progress(
                     dataset_name,
                     modal_type,
                     sub_kind,
                     pred_label_type,
-                    f"nonlinear contribution saved: {method_name}",
+                    f"shap contribution saved: {method_name}",
                 )
             except Exception as exc:
-                haufe_status = "failed"
-                haufe_error = str(exc)
+                interpret_status = "failed"
+                interpret_error = str(exc)
                 log_progress(
                     dataset_name,
                     modal_type,
                     sub_kind,
                     pred_label_type,
-                    f"nonlinear contribution failed: {method_name}",
+                    f"shap contribution failed: {exc}",
                 )
 
         for subj_i in range(num_subj):
@@ -261,9 +288,9 @@ def run_one_dataset(
                 "pred_label_type": pred_label_type,
                 "n_subjects": int(num_subj),
                 "cv_folds": int(n_splits),
-                "haufe_status": haufe_status,
-                "haufe_csv": haufe_csv,
-                "haufe_error": haufe_error,
+                "interpret_status": interpret_status,
+                "interpret_csv": interpret_csv,
+                "interpret_error": interpret_error,
                 **metrics,
             }
         )
@@ -271,7 +298,7 @@ def run_one_dataset(
 
     pred_df = pd.DataFrame(per_subject_rows)
     summary_df = pd.DataFrame(summary_rows)
-    pred_csv = os.path.join(stats_dir, f"pred__{combo_stem}.csv")
+    pred_csv = os.path.join(pred_dir, f"pred__{combo_stem}.csv")
     summary_csv = os.path.join(stats_dir, f"summary__{combo_stem}.csv")
 
     pred_df.to_csv(pred_csv, index=False)
@@ -292,8 +319,7 @@ def run_modality_batch(
     random_state=42,
 ):
     base_out_dir = f"./res_{dataset_name}"
-    os.makedirs(os.path.join(base_out_dir, "stats"), exist_ok=True)
-    os.makedirs(os.path.join(base_out_dir, "pics"), exist_ok=True)
+    # Directories are created automatically by get_label_dirs in run_one_dataset
     dt_cfg = get_dataset_cfg(dataset_name)
     modal_type = normalize_modal_type(modality_name if modality_name is not None else modal_type)
     if atlas_names is None and atlas_name is not None:
@@ -347,13 +373,12 @@ def run_modality_batch(
     pred_all_df = pd.concat(all_pred, ignore_index=True) if all_pred else pd.DataFrame()
     summary_all_df = pd.concat(all_summary, ignore_index=True) if all_summary else pd.DataFrame()
     pred_all_df.to_csv(
-        os.path.join(base_out_dir, "stats", f"pred__{dataset_name}__{sanitize_name(modal_type)}_all_combinations.csv"),
+        os.path.join(base_out_dir, f"pred__{dataset_name}__{sanitize_name(modal_type)}_all_combinations.csv"),
         index=False,
     )
     summary_all_df.to_csv(
         os.path.join(
             base_out_dir,
-            "stats",
             f"summary__{dataset_name}__{sanitize_name(modal_type)}_all_combinations.csv",
         ),
         index=False,
