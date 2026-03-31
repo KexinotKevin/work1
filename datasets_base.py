@@ -274,6 +274,18 @@ def load_conn(
             def _read_csv(sid):
                 return pd.read_csv(subj_to_file[sid], header=None).values
 
+            empty_sids = set(sid for sid in subj_to_file if os.path.getsize(subj_to_file[sid]) == 0)
+            if empty_sids:
+                print(f"  [warn] Skipping {len(empty_sids)} subject(s) with empty files for atlas={atlas} kind={k}")
+                for sid in empty_sids:
+                    del subj_to_file[sid]
+
+            current_valid = [sid for sid in current_valid if sid not in empty_sids]
+            if not current_valid:
+                raise ValueError(
+                    f"No connectivity matrices left after filtering empty files for atlas={atlas} kind={k}."
+                )
+
             with ThreadPoolExecutor(max_workers=min(32, len(current_valid))) as pool:
                 mats = list(pool.map(_read_csv, current_valid))
 

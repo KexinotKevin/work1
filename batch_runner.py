@@ -228,9 +228,10 @@ def run_one_dataset(
         interpret_error = ""
 
         if method_cfg["method_type"] == "linear":
-            if hasattr(fitted_model, "coef_"):
+            # 由于模型被 DeconfoundWrapper 包装，真实的线性模型存储在 fitted_model.estimator_ 中
+            if hasattr(fitted_model, "estimator_") and hasattr(fitted_model.estimator_, "coef_"):
                 try:
-                    model_coef = np.asarray(fitted_model.coef_).reshape(-1)
+                    model_coef = np.asarray(fitted_model.estimator_.coef_).reshape(-1)
                     contribution_mat = haufe_transform(train_picked_edges, y, model_coef, num_nodes=num_roi)
                     interpret_csv = os.path.join(
                         stats_dir,
@@ -244,33 +245,16 @@ def run_one_dataset(
                     interpret_error = str(exc)
                     log_progress(dataset_name, modal_type, sub_kind, pred_label_type, f"haufe failed: {method_name}")
         else:
-            try:
-                contribution_mat = get_edge_contributions_symmetric(
-                    fitted_model, X, y, method="shap"
-                )
-                interpret_csv = os.path.join(
-                    shap_dir,
-                    f"shap__{combo_stem}__method_{sanitize_name(method_name)}.csv",
-                )
-                pd.DataFrame(contribution_mat).to_csv(interpret_csv, index=False)
-                interpret_status = "ok"
-                log_progress(
-                    dataset_name,
-                    modal_type,
-                    sub_kind,
-                    pred_label_type,
-                    f"shap contribution saved: {method_name}",
-                )
-            except Exception as exc:
-                interpret_status = "failed"
-                interpret_error = str(exc)
-                log_progress(
-                    dataset_name,
-                    modal_type,
-                    sub_kind,
-                    pred_label_type,
-                    f"shap contribution failed: {exc}",
-                )
+            # CVCR 框架：彻底关闭非线性模型的解释
+            interpret_status = "disabled"
+            interpret_error = "Non-linear post-interpretation is turned off for CVCR framework."
+            log_progress(
+                dataset_name,
+                modal_type,
+                sub_kind,
+                pred_label_type,
+                f"shap skipped (disabled): {method_name}",
+            )
 
         for subj_i in range(num_subj):
             per_subject_rows.append(
@@ -336,7 +320,8 @@ def run_modality_batch(
     label_names=None,
     random_state=42,
 ):
-    base_out_dir = f"./res_{dataset_name}"
+    # CVCR 框架：结果输出到 results_CVCR 目录
+    base_out_dir = f"./results_CVCR/{dataset_name}"
     # Directories are created automatically by get_label_dirs in run_one_dataset
     dt_cfg = get_dataset_cfg(dataset_name)
     modal_type = normalize_modal_type(modality_name if modality_name is not None else modal_type)
