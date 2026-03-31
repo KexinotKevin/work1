@@ -345,10 +345,29 @@ def _standardize_columns(df, tgtlabels):
     df_renamed = df.rename(columns=rename_map)
     
     # 将性别转换为 0/1 数值型，并确保 age 是浮点数，以便后续进行线性回归
-    df_renamed['gender'] = df_renamed['gender'].replace(['F', 'Female', 2], 0).astype(float)
-    df_renamed['gender'] = df_renamed['gender'].replace(['M', 'Male', 1], 1).astype(float)
+    df_renamed['gender'] = df_renamed['gender'].replace(['F', 'Female', 2], 0)
+    df_renamed['gender'] = df_renamed['gender'].replace(['M', 'Male', 1], 1)
+    df_renamed['gender'] = df_renamed['gender'].astype(float)
+    
+    #【更新】增加对不同数据集年龄格式的兼容性处理
     if 'age' in df_renamed.columns:
-        df_renamed['age'] = df_renamed['age'].astype(float)
+        # 定义内部解析函数，兼容三种数据集格式
+        def _parse_age_robustly(val):
+            if pd.isna(val): return val
+            s = str(val).strip()
+            if '-' in s: # 针对 S1200: 将 "26-30" 转换为中值 28.0
+                try:
+                    low, high = s.split('-')
+                    return (float(low) + float(high)) / 2
+                except: return np.nan
+            elif '+' in s: # 针对 S1200: 将 "36+" 转换为下界数值 36.0
+                try:
+                    return float(s.replace('+', ''))
+                except: return np.nan
+            else: # 针对 ABCD ("9") 和 HCD (25.5) 的标准数值格式
+                return pd.to_numeric(s, errors='coerce')
+        
+        df_renamed['age'] = df_renamed['age'].apply(_parse_age_robustly).astype(float)
     
     # 检查哪些标准列缺失
     missing = set(std_names) - set(rename_map.values())

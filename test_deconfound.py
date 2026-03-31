@@ -175,7 +175,7 @@ def run_single_experiment(
 
 def main():
     """主测试函数"""
-    dataset_name = "ABCD"
+    dataset_name = "S1200"
     atlas_names = ["bna246", "schaefer200_s1"]
     modal_types = ["SC", "FC"]
     sc_kinds = list(SC_KIND.keys())
@@ -186,6 +186,7 @@ def main():
     }
     random_state = 42
     n_splits = 10
+    resdir="./res_CVCR"
 
     # 获取标签列表
     dt_cfg = get_dataset_cfg(dataset_name)
