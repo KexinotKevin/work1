@@ -343,8 +343,12 @@ def _standardize_columns(df, tgtlabels):
     
     # 重命名
     df_renamed = df.rename(columns=rename_map)
-    df_renamed['gender'] = df_renamed['gender'].replace(['F', 2], 'Female')
-    df_renamed['gender'] = df_renamed['gender'].replace(['M', 1], 'Male')
+    
+    # 将性别转换为 0/1 数值型，并确保 age 是浮点数，以便后续进行线性回归
+    df_renamed['gender'] = df_renamed['gender'].replace(['F', 'Female', 2], 0).astype(float)
+    df_renamed['gender'] = df_renamed['gender'].replace(['M', 'Male', 1], 1).astype(float)
+    if 'age' in df_renamed.columns:
+        df_renamed['age'] = df_renamed['age'].astype(float)
     
     # 检查哪些标准列缺失
     missing = set(std_names) - set(rename_map.values())

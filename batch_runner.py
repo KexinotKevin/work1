@@ -10,7 +10,7 @@ from sklearn.model_selection import KFold, cross_val_predict
 from datasets_base import FC_KIND, SC_KIND, SFC_KIND, load_data, normalize_modal_type
 from datasets_cfg import atlases, get_dataset_cfg
 from edge_selection import haufe_transform, select_sig_edges
-from models import get_regression_model
+from models import get_regression_model, DeconfoundWrapper
 from post_interpret import get_edge_contributions_symmetric
 
 
@@ -18,7 +18,7 @@ METHODS = [
     {"method_type": "linear", "method_name": "lasso", "params": {"alpha": 0.05, "max_iter": 5000}},
     {"method_type": "linear", "method_name": "ridge", "params": {"alpha": 1.0}},
     {"method_type": "linear", "method_name": "linear", "params": {}},
-    {"method_type": "linear", "method_name": "huber", "params": {"epsilon": 1.35}},
+    {"method_type": "linear", "method_name": "huber", "params": {"epsilon": 1.35, "max_iter": 1000}},
     {
         "method_type": "nonlinear",
         "method_name": "kernel_ridge_rbf",
@@ -156,6 +156,7 @@ def run_one_dataset(
     pred_label_type,
     random_state=42,
     n_splits=10,
+    confounds=None,
 ):
     atlas_name = normalize_atlas_name(atlas_name)
     modal_type = normalize_modal_type(modal_type)
@@ -186,6 +187,16 @@ def run_one_dataset(
     y = labels.astype(float)
     cv = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
 
+    # 如果提供了协变量，则拼接在特征矩阵后面
+    if confounds is not None and len(confounds) == len(y):
+        C = np.array(confounds)
+        if C.ndim == 1:
+            C = C.reshape(-1, 1)
+        X = np.hstack((X, C))
+        use_deconfound = True
+    else:
+        use_deconfound = False
+
     per_subject_rows = []
     summary_rows = []
 
@@ -198,11 +209,18 @@ def run_one_dataset(
 
         base_model = get_regression_model(method_cfg["method_type"], method_cfg["method_name"], **params)
         model = clone(base_model)
+
+        # 如果需要去交杂，使用包装器
+        if use_deconfound:
+            model = DeconfoundWrapper(model, n_confounds=C.shape[1])
+
         y_pred = cross_val_predict(model, X, y, cv=cv)
         metrics = evaluate_predictions(y, y_pred)
 
         log_progress(dataset_name, modal_type, sub_kind, pred_label_type, f"full fit start: {method_name}")
         fitted_model = clone(base_model)
+        if use_deconfound:
+            fitted_model = DeconfoundWrapper(fitted_model, n_confounds=C.shape[1])
         fitted_model.fit(X, y)
 
         interpret_csv = ""
@@ -355,6 +373,23 @@ def run_modality_batch(
                     log_progress(dataset_name, modal_type, conn_kind, label_name, "skip: fewer than 10 valid subjects")
                     continue
 
+                # 提取协变量（age 和 gender），确保与 valid_mask 对齐
+                if "age" in scores_df.columns and "gender" in scores_df.columns:
+                    age_vals = pd.to_numeric(scores_df["age"], errors="coerce").to_numpy()
+                    gender_vals = pd.to_numeric(scores_df["gender"], errors="coerce").to_numpy()
+                    age_valid = np.isfinite(age_vals)
+                    gender_valid = np.isfinite(gender_vals)
+                    confound_mask = valid_mask & age_valid & gender_valid
+                    if confound_mask.sum() == valid_mask.sum():
+                        confounds = np.column_stack((
+                            age_vals[valid_mask],
+                            gender_vals[valid_mask]
+                        ))
+                    else:
+                        confounds = None
+                else:
+                    confounds = None
+
                 pred_df, summary_df = run_one_dataset(
                     base_out_dir=base_out_dir,
                     dataset_name=dataset_name,
@@ -366,6 +401,7 @@ def run_modality_batch(
                     pred_label_type=label_name,
                     random_state=random_state,
                     n_splits=10,
+                    confounds=confounds,
                 )
                 all_pred.append(pred_df)
                 all_summary.append(summary_df)

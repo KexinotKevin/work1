@@ -16,6 +16,47 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.model_selection import cross_val_predict
 from sklearn.model_selection import cross_val_score
 from sklearn.metrics import mean_absolute_error, mean_squared_error, root_mean_squared_error, r2_score
+from sklearn.base import BaseEstimator, RegressorMixin, clone
+
+
+class DeconfoundWrapper(BaseEstimator, RegressorMixin):
+    """
+    双向去交杂包装器：自动分离特征与协变量，在内部对 X 和 y 进行残差化。
+    """
+    def __init__(self, base_estimator, n_confounds=2):
+        self.base_estimator = base_estimator
+        self.n_confounds = n_confounds
+
+    def fit(self, X, y):
+        # 1. 拆分出主特征和协变量 (假设协变量拼接在 X 的最后面)
+        X_feat = X[:, :-self.n_confounds]
+        C = X[:, -self.n_confounds:]
+
+        # 2. 拟合协变量到特征和标签的线性关系
+        self.model_X_ = LinearRegression().fit(C, X_feat)
+        self.model_y_ = LinearRegression().fit(C, y)
+
+        # 3. 计算残差
+        X_res = X_feat - self.model_X_.predict(C)
+        y_res = y - self.model_y_.predict(C)
+
+        # 4. 用残差数据训练你传入的基础模型（例如带有特征选择的 Pipeline）
+        self.estimator_ = clone(self.base_estimator)
+        self.estimator_.fit(X_res, y_res)
+        return self
+
+    def predict(self, X):
+        X_feat = X[:, :-self.n_confounds]
+        C = X[:, -self.n_confounds:]
+
+        # 1. 对测试特征去交杂 (应用训练集拟合的系数)
+        X_res = X_feat - self.model_X_.predict(C)
+
+        # 2. 预测残差目标的得分
+        y_res_pred = self.estimator_.predict(X_res)
+
+        # 3. 将协变量的基线影响加回去，使得预测值与原始 y 处于同一尺度
+        return y_res_pred + self.model_y_.predict(C)
 
 
 def get_regression_model(model_group, model_name, **model_params):
