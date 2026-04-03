@@ -33,8 +33,9 @@ def load_model_weights(stats_dir, task, dataset, atlas, model_group='linear'):
     # 线性模型使用 haufe 文件（在 stats 目录下）
     # 匹配: haufe__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*.csv
     if model_group == 'linear':
+        # 【修改这里】：去掉 os.path.join 中多余的 task 层级
         search_pattern = os.path.join(
-            atlas_dir, "stats", task,
+            stats_dir,
             f'haufe__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*__method_*.csv'
         )
         all_file_paths = glob.glob(search_pattern)
@@ -63,8 +64,10 @@ def load_model_weights(stats_dir, task, dataset, atlas, model_group='linear'):
     # 非线性模型使用 permutation 文件（在 permutation 目录下）
     # 匹配: permutation__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*.csv
     elif model_group in ('nonlinear', 'mlp'):
+        # 【修改这里】：去掉 os.path.join 中多余的 task 层级
+        permutation_dir = os.path.join(stats_dir, "..", "permutation")
         search_pattern = os.path.join(
-            atlas_dir, "permutation", task,
+            permutation_dir,
             f'permutation__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*__method_*.csv'
         )
         all_file_paths = glob.glob(search_pattern)
@@ -97,45 +100,112 @@ def load_model_weights(stats_dir, task, dataset, atlas, model_group='linear'):
 
 def percentile_rank_transform(weight_matrix):
     """
-    第一步：贡献度量纲标准化与秩转换
-    将每个模态/模型的原始权重转化为 (0, 1] 的百分位秩。
+    第一步：贡献度量纲标准化与秩转换（保留符号信息）
+    将每个模态/模型的原始权重转化为有符号的百分位秩。
+    - 正值映射到 (0.5, 1] 范围
+    - 负值映射到 [-1, -0.5) 范围
+    - 零值保持为 0
     
     参数:
         weight_matrix (np.ndarray): 形状为 (K, D) 的矩阵。K 为模态数，D 为边数。
         
     返回:
-        rank_matrix (np.ndarray): 转换后的秩矩阵，形状同上。
+        rank_matrix (np.ndarray): 转换后的有符号秩矩阵，形状同上。
     """
     K, D = weight_matrix.shape
     rank_matrix = np.zeros_like(weight_matrix, dtype=np.float64)
     
     for k in range(K):
-        # 注意：Haufe 权重反映的是协方差/贡献度，绝对值越大代表贡献越强
-        # 因此我们先取绝对值，再计算秩次 (默认升序，最大的绝对值秩次最接近 D)
-        abs_weights = np.abs(weight_matrix[k, :])
+        weights_k = weight_matrix[k, :]
+        pos_mask = weights_k > 0
+        neg_mask = weights_k < 0
         
-        # rankdata 分配从 1 到 D 的秩次，除以 D 映射到 (0, 1] 范围
-        rank_matrix[k, :] = rankdata(abs_weights) / D
+        # 正值的百分位秩：映射到 (0.5, 1]
+        if np.any(pos_mask):
+            pos_abs = np.abs(weights_k[pos_mask])
+            if pos_abs.max() > pos_abs.min():
+                pos_ranks = rankdata(pos_abs) / len(pos_abs)
+            else:
+                pos_ranks = np.ones(len(pos_abs))
+            # 映射到 [0.5, 1]，0 表示无贡献
+            rank_matrix[k, pos_mask] = 0.5 + 0.5 * pos_ranks
         
+        # 负值的百分位秩：映射到 [-1, -0.5)
+        if np.any(neg_mask):
+            neg_abs = np.abs(weights_k[neg_mask])
+            if neg_abs.max() > neg_abs.min():
+                neg_ranks = rankdata(neg_abs) / len(neg_abs)
+            else:
+                neg_ranks = np.ones(len(neg_abs))
+            # 映射到 [-1, -0.5]
+            rank_matrix[k, neg_mask] = -0.5 - 0.5 * neg_ranks
+        
+        # 零值保持为 0
+    
     return rank_matrix
 
 def calculate_stability_score(rank_matrix):
     """
-    第二步：跨模态稳定得分（Stability Score）的度量
-    计算每条边在所有模态/模型下的几何平均得分。
+    第二步：跨模态稳定得分（Stability Score）的度量（保留符号）
+    计算每条边在所有模态/模型下的几何平均得分，保留正负符号。
+    
+    计算逻辑：
+    1. 分别对正负边计算几何平均强度
+    2. 基于投票机制决定最终符号
+    3. 如果多数模型认为是正向贡献则为正，否则为负
     
     参数:
-        rank_matrix (np.ndarray): 形状为 (K, D) 的秩矩阵。
+        rank_matrix (np.ndarray): 形状为 (K, D) 的有符号秩矩阵。
         
     返回:
-        stability_scores (np.ndarray): 形状为 (D,) 的一维数组，代表每条边的稳定性得分。
+        stability_scores (np.ndarray): 形状为 (D,) 的一维数组，
+                                        代表每条边的稳定性得分。
+                                        正值表示正相关稳定，负值表示负相关稳定。
     """
-    # 数学说明：直接连乘 k 个小数可能导致数值下溢（浮点数精度丢失）。
-    # 稳健的计算方式是利用对数转换：(x1*x2*...*xk)^(1/k) = exp( mean( ln(x1), ln(x2), ..., ln(xk) ) )
-    # 因为秩的范围是 (0, 1]，不用担心 log 负数问题。
+    K, D = rank_matrix.shape
     
-    log_ranks = np.log(rank_matrix)
-    stability_scores = np.exp(np.mean(log_ranks, axis=0))
+    # 获取每条边被标记为正/负的模型数量
+    pos_votes = np.sum(rank_matrix > 0, axis=0)  # 正值投票数
+    neg_votes = np.sum(rank_matrix < 0, axis=0)  # 负值投票数
+    total_votes = pos_votes + neg_votes  # 非零投票数
+    
+    # 计算正值的几何平均
+    pos_abs_mean = np.zeros(D)
+    pos_mask = pos_votes > 0
+    if np.any(pos_mask):
+        pos_rank_abs = np.abs(rank_matrix[:, pos_mask])
+        log_pos = np.log(pos_rank_abs + 1e-10)
+        pos_abs_mean[pos_mask] = np.exp(np.mean(log_pos, axis=0))
+    
+    # 计算负值的几何平均（取绝对值）
+    neg_abs_mean = np.zeros(D)
+    neg_mask = neg_votes > 0
+    if np.any(neg_mask):
+        neg_rank_abs = np.abs(rank_matrix[:, neg_mask])
+        log_neg = np.log(neg_rank_abs + 1e-10)
+        neg_abs_mean[neg_mask] = np.exp(np.mean(log_neg, axis=0))
+    
+    # 基于投票决定最终符号和强度
+    stability_scores = np.zeros(D)
+    
+    # 多数票胜出
+    # 如果正票 > 负票，使用正值强度；否则使用负值强度
+    pos_wins = pos_votes > neg_votes
+    neg_wins = neg_votes > pos_votes
+    tie = (pos_votes == neg_votes) & (total_votes > 0)
+    
+    stability_scores[pos_wins] = pos_abs_mean[pos_wins]
+    stability_scores[neg_wins] = -neg_abs_mean[neg_wins]
+    
+    # 平票时：如果有非零票，取绝对值较大者的符号
+    # 如果无任何票（全是零），保持为 0
+    if np.any(tie):
+        tie_pos = pos_abs_mean[tie]
+        tie_neg = neg_abs_mean[tie]
+        tie_sign = np.where(tie_pos >= tie_neg, 1, -1)
+        tie_abs = np.maximum(tie_pos, tie_neg)
+        stability_scores[tie] = tie_sign * tie_abs
+    
     return stability_scores
 
 def edge_to_node_mapping(stability_scores, threshold_percentile=None):
@@ -143,35 +213,92 @@ def edge_to_node_mapping(stability_scores, threshold_percentile=None):
     第三步：节点级预测贡献度映射（Nodal Mapping）
     基于加权节点强度理论，将边贡献映射至节点。
     
+    重要：本函数现在支持有符号的 stability_scores：
+    - 正值表示正向贡献（正相关），负值表示负向贡献（负相关）
+    - 阈值筛选基于绝对值，确保正负显著边都被考虑
+    - 节点强度反映该节点参与的所有显著边的代数和
+    
     参数:
-        stability_scores (np.ndarray): 形状为 (D,) 的边得分数组。
-        threshold_percentile (float, 可选): 例如 0.90，表示仅聚合前 10% 的显著边。如为 None 则聚合所有边。
+        stability_scores (np.ndarray): 形状为 (D,) 的有符号边得分数组。
+        threshold_percentile (float, 可选): 例如 0.90，表示仅聚合绝对值前 10% 的显著边。
+                                           如为 None 则聚合所有边。
         
     返回:
         nodal_strengths (np.ndarray): 形状为 (N,) 的节点得分数组。
+                                      正值表示正向贡献为主的节点，负值表示负向贡献为主的节点。
         N (int): 节点数量。
     """
     D = len(stability_scores)
     # 反推节点数 N：已知边数 D = N*(N-1)/2，解一元二次方程 N^2 - N - 2D = 0
     N = int(np.round((1 + np.sqrt(1 + 8 * D)) / 2))
     
-    # 构建 N x N 对称连接矩阵
+    # 构建 N x N 对称连接矩阵（保留符号）
     adj_matrix = np.zeros((N, N))
     iu = np.triu_indices(N, k=1)
     
-    # 显著性边筛选：论文中提到 E_sig。这里提供一种简单的百分位阈值筛选法
+    # 显著性边筛选：基于绝对值进行百分位阈值筛选
     if threshold_percentile is not None:
-        threshold_val = np.quantile(stability_scores, threshold_percentile)
-        # 将低于阈值的得分置为 0，不参与节点聚合
-        filtered_scores = np.where(stability_scores >= threshold_val, stability_scores, 0.0)
+        abs_scores = np.abs(stability_scores)
+        threshold_val = np.quantile(abs_scores, threshold_percentile)
+        # 保留符号，只保留绝对值大于阈值的边
+        filtered_scores = np.where(abs_scores >= threshold_val, stability_scores, 0.0)
     else:
         filtered_scores = stability_scores
-        
+    
     # 填充上三角并对称化
     adj_matrix[iu] = filtered_scores
     adj_matrix = adj_matrix + adj_matrix.T
     
     # 节点度量：沿着相邻节点求和（对应公式中 \sum_{j \in \mathcal{N}(v)}）
+    # 正负连边会相互抵消，反映该节点的"净"连接特性
     nodal_strengths = np.sum(adj_matrix, axis=1)
     
     return nodal_strengths, N
+
+
+def edge_to_node_mapping_signed(stability_scores, threshold_percentile=None):
+    """
+    第三步（备选版本）：节点级预测贡献度映射（分别统计正负贡献）
+    
+    与 edge_to_node_mapping 不同，本函数分别计算正向和负向节点贡献，
+    返回两个独立的节点强度数组。
+    
+    参数:
+        stability_scores (np.ndarray): 形状为 (D,) 的有符号边得分数组。
+        threshold_percentile (float, 可选): 例如 0.90，表示仅聚合绝对值前 10% 的显著边。
+        
+    返回:
+        nodal_strengths_pos (np.ndarray): 形状为 (N,) 的正向节点强度数组。
+        nodal_strengths_neg (np.ndarray): 形状为 (N,) 的负向节点强度数组。
+        N (int): 节点数量。
+    """
+    D = len(stability_scores)
+    N = int(np.round((1 + np.sqrt(1 + 8 * D)) / 2))
+    
+    # 分离正负连边
+    pos_scores = np.maximum(stability_scores, 0.0)  # 只保留正值
+    neg_scores = np.minimum(stability_scores, 0.0)  # 只保留负值
+    
+    # 阈值筛选（基于原始绝对值）
+    if threshold_percentile is not None:
+        abs_scores = np.abs(stability_scores)
+        threshold_val = np.quantile(abs_scores, threshold_percentile)
+        pos_scores = np.where(abs_scores >= threshold_val, pos_scores, 0.0)
+        neg_scores = np.where(abs_scores >= threshold_val, neg_scores, 0.0)
+    
+    # 构建正负邻接矩阵
+    adj_pos = np.zeros((N, N))
+    adj_neg = np.zeros((N, N))
+    iu = np.triu_indices(N, k=1)
+    
+    adj_pos[iu] = pos_scores
+    adj_pos = adj_pos + adj_pos.T
+    
+    adj_neg[iu] = np.abs(neg_scores)  # 负值取绝对值
+    adj_neg = adj_neg + adj_neg.T
+    
+    # 节点强度 = 入射边的加权和
+    nodal_strengths_pos = np.sum(adj_pos, axis=1)
+    nodal_strengths_neg = np.sum(adj_neg, axis=1)
+    
+    return nodal_strengths_pos, nodal_strengths_neg, N

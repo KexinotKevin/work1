@@ -1,29 +1,30 @@
 import os
 import numpy as np
 import nibabel as nib
-import matplotlib.pyplot as plt
 from nilearn.plotting import plot_stat_map
+from datasets_cfg import datasets
 
 from draw_brain import draw_connectome, draw_atlas_roi, _save_display
 
-from stage1_intra_atlas import (
-    load_model_weights, 
-    percentile_rank_transform, 
-    calculate_stability_score, 
-    edge_to_node_mapping
-)
-from stage2_inter_atlas import (
-    load_and_align_atlas, 
-    project_to_voxel_space, 
-    calculate_gci_and_confidence
-)
-from stage3_statistical_inference import cluster_level_fwe_correction
-
 def build_adjacency_matrix(stability_scores, threshold_percentile):
+    """
+    根据保留的稳定分数和阈值百分位，重建 N x N 的邻接矩阵。
+    
+    支持有符号的 stability_scores：
+    - 阈值筛选基于绝对值，确保正负显著边都被考虑
+    - 保留原始符号
+    
+    参数:
+        stability_scores: 有符号的边得分数组
+        threshold_percentile: 阈值百分位（基于绝对值）
+    """
     D = len(stability_scores)
     N = int(np.round((1 + np.sqrt(1 + 8 * D)) / 2))
-    threshold_val = np.quantile(stability_scores, threshold_percentile)
-    filtered_scores = np.where(stability_scores >= threshold_val, stability_scores, 0.0)
+    
+    # 基于绝对值进行阈值筛选
+    abs_scores = np.abs(stability_scores)
+    threshold_val = np.quantile(abs_scores, threshold_percentile)
+    filtered_scores = np.where(abs_scores >= threshold_val, stability_scores, 0.0)
     
     adj_matrix = np.zeros((N, N))
     iu = np.triu_indices(N, k=1)
@@ -31,139 +32,111 @@ def build_adjacency_matrix(stability_scores, threshold_percentile):
     adj_matrix = adj_matrix + adj_matrix.T
     return adj_matrix
 
-def mock_null_distribution(num_permutations=10000):
-    return np.sort(np.random.exponential(scale=50, size=num_permutations).astype(int))
-
-def main(task_name=None):
-    # ---------- 全局配置 ----------
-    DATASET = 'S1200'
-    TASK_NAME = 'CogFluidComp_Unadj' if task_name is None else task_name
-    BASE_DIR = f'./res_{DATASET}'
-    STATS_DIR = os.path.join(BASE_DIR, "stats")  # 兼容旧代码，但实际路径在子目录中
-    PICS_DIR = f'./res_{DATASET}'  # 将在下面重新组织
-
+def main(dataset_name=None):
+    DATASET = dataset_name if dataset_name is not None else 'S1200'
+    tasks = datasets[DATASET]['tgt_label_list'][3:]
+    
+    # 【适配修改 1】 指向最新的结果目录
+    BASE_DIR = f'./results_CVCR/{DATASET}'
     ATLASES = ['bna246', 'schaefer200_S1']
-    ATLAS_DIR = "/media/shulab/WD_10T/datasets/utils/mergedAtlas/Lin6/"
-
-    # 新的分组配置
+    ATLAS_DIR = "../../datasets/utils/mergedAtlas/Lin6/"
+    # 模型分组
     MODEL_GROUPS = ['linear', 'nonlinear', 'mlp']
 
-    os.makedirs(PICS_DIR, exist_ok=True)
+    for TASK_NAME in tasks:
+        for model_group in MODEL_GROUPS:
+            print(f"\n{'='*50}")
+            print(f"🚀 开始可视化算法组: [{model_group.upper()}]")
+            print(f"{'='*50}")
 
-    for model_group in MODEL_GROUPS:
-        print(f"\n{'='*50}")
-        print(f"🚀 开始处理算法组: [{model_group.upper()}]")
-        print(f"{'='*50}")
+            # -----------------------------------------------------------------
+            # 需求 1 & 2: 提取同种分区、跨方法的关键连边与关键脑区 Numpy 矩阵
+            # -----------------------------------------------------------------
+            for atlas_name in ATLASES:
+                print(f"\n>>> 正在生成分区绘图: {atlas_name}")
+                atlas_nifti_path = os.path.join(ATLAS_DIR, f"{atlas_name}.nii.gz")
 
-        all_gci_volumes = []
-        reference_affine = None
-        reference_atlas_path = None
+                # 【适配修改 2】 定位由 run_full_stages 落盘的 .npy 路径
+                atlas_stats_dir = os.path.join(BASE_DIR, atlas_name, "stats", TASK_NAME)
+                # 生成对应图片的输出目录: results_CVCR/{DATASET}/{ATLAS}/pics/{TASK_NAME}/
+                atlas_pics_dir = os.path.join(BASE_DIR, atlas_name, "pics", TASK_NAME)
+                os.makedirs(atlas_pics_dir, exist_ok=True)
 
-        # -----------------------------------------------------------------
-        # 需求 1 & 2: 同种分区、跨方法的关键连边与关键脑区
-        # -----------------------------------------------------------------
-        for atlas_name in ATLASES:
-            print(f"\n>>> 正在分析分区: {atlas_name}")
-            atlas_nifti_path = os.path.join(ATLAS_DIR, f"{atlas_name}.nii.gz")
+                stability_npy_path = os.path.join(atlas_stats_dir, f"connectome_stability_{model_group}.npy")
+                roi_npy_path = os.path.join(atlas_stats_dir, f"roi_strengths_{model_group}.npy")
 
-            if reference_atlas_path is None:
-                reference_atlas_path = atlas_nifti_path
-            aligned_atlas_img, _ = load_and_align_atlas(atlas_nifti_path, reference_atlas_path)
-            if reference_affine is None:
-                reference_affine = aligned_atlas_img.affine
+                if not os.path.exists(stability_npy_path) or not os.path.exists(roi_npy_path):
+                    print(f"     ⚠️ 找不到 {atlas_name} 的 .npy 文件，跳过此分区的绘图。")
+                    continue
 
-            # 新目录结构: res_{dataset}/{atlas}/stats/{task}/
-            atlas_stats_dir = os.path.join(BASE_DIR, atlas_name, "stats")
-            # 新目录结构: res_{dataset}/{atlas}/pics/{task}/
-            atlas_pics_dir = os.path.join(BASE_DIR, atlas_name, "pics", TASK_NAME, "Stage_Results_Vis")
-            os.makedirs(atlas_pics_dir, exist_ok=True)
+                # 直接极速加载计算好的结果
+                stability_scores = np.load(stability_npy_path)
+                nodal_strengths = np.load(roi_npy_path)
 
-            # [Stage 1 计算]
-            weight_matrix, file_names = load_model_weights(atlas_stats_dir, TASK_NAME, DATASET, atlas_name, model_group=model_group)
-            if len(weight_matrix) == 0:
-                continue
+                # 【绘图 1】 Connectome (取最顶级的 1% 的边)
+                for pct_label, pct_val in [('1pct', 0.99)]:
+                    adj_matrix = build_adjacency_matrix(stability_scores, threshold_percentile=pct_val)
+                    draw_connectome(
+                        adjacency_matrix=adj_matrix,
+                        atlas_img=atlas_nifti_path,
+                        edge_threshold="90%",
+                        save_dir=atlas_pics_dir,
+                        filename=f"Req1_Connectome_{model_group}_{atlas_name}_top0.01.pdf"
+                    )
 
-            # 根据模型组别确定加载的文件类型描述
-            file_type_desc = "Haufe" if model_group == 'linear' else "Permutation"
-            print(f"     已加载 {len(file_names)} 个对应的 {file_type_desc} 权重文件。")
-            rank_matrix = percentile_rank_transform(weight_matrix)
-            stability_scores = calculate_stability_score(rank_matrix)
-
-            # 【需求 1】 Connectome (10%, 30%, 50%)
-            # 更新：只绘制1%的连边
-            for pct_label, pct_val in [('1pct', 0.99)]:
-                adj_matrix = build_adjacency_matrix(stability_scores, threshold_percentile=pct_val)
-                draw_connectome(
-                    adjacency_matrix=adj_matrix,
+                # 【绘图 2】 Stage 1 ROI (节点强度投影图)
+                draw_atlas_roi(
+                    roi_values=nodal_strengths,
                     atlas_img=atlas_nifti_path,
-                    edge_threshold="0%",
-                    # title=f"{model_group.capitalize()} Connectome (Top {pct_label}) - {atlas_name}",
+                    view="surf" if "schaefer" in atlas_name.lower() else "stat",
+                    title=f"{model_group.capitalize()} Intra-Atlas ROI ({atlas_name})",
                     save_dir=atlas_pics_dir,
-                    filename=f"Req1_Connectome_{model_group}_{atlas_name}_top0.01.pdf"
+                    filename=f"Req2_IntraROI_{model_group}_{atlas_name}.pdf"
                 )
 
-            # 【需求 2】 Stage 1 ROI (聚合前 5% 连边)
-            nodal_strengths, _ = edge_to_node_mapping(stability_scores, threshold_percentile=0.95)
-            draw_atlas_roi(
-                roi_values=nodal_strengths,
-                atlas_img=atlas_nifti_path,
-                view="surf" if "schaefer" in atlas_name.lower() else "stat",
-                title=f"{model_group.capitalize()} Intra-Atlas ROI ({atlas_name})",
-                save_dir=atlas_pics_dir,
-                filename=f"Req2_IntraROI_{model_group}_{atlas_name}.pdf"
-            )
+            # -----------------------------------------------------------------
+            # 需求 3 & 4: 跨分区全局一致性核心脑区 (GCI) 与 统计推断 (FWE)
+            # -----------------------------------------------------------------
+            print(f"\n>>> 正在生成 [{model_group.upper()}] 跨图谱融合与统计校正绘图...")
+            
+            # 【适配修改 3】 读取 CrossMethodAnal_Results 中的 NIfTI 对象
+            stage_out_dir = os.path.join(BASE_DIR, 'CrossMethodAnal_Results', TASK_NAME)
+            # 生成对应的合并图片的输出目录: results_CVCR/{DATASET}/CrossMethodAnal_Results/{TASK_NAME}/pics
+            stage_pics_dir = os.path.join(stage_out_dir, 'pics')
+            os.makedirs(stage_pics_dir, exist_ok=True)
 
-            # [Stage 2 投影]
-            volume_data, _ = project_to_voxel_space(nodal_strengths, aligned_atlas_img)
-            all_gci_volumes.append(volume_data)
+            # 注意：此处的文件名拼写必须与 run_full_stages 中完全一致
+            gci_nifti_path = os.path.join(stage_out_dir, f'GCI_{DATASET}_{model_group}_Merged_{len(ATLASES)}Atlases.nii.gz')
+            fwe_nifti_path = os.path.join(stage_out_dir, f'GCI_{DATASET}_{model_group}_FWECorrected.nii.gz')
 
-        if not all_gci_volumes:
-            continue
+            # 绘制 GCI 融合脑图
+            if os.path.exists(gci_nifti_path):
+                gci_nifti = nib.load(gci_nifti_path)
+                display_gci = plot_stat_map(
+                    gci_nifti,
+                    title=f"{model_group.capitalize()} Inter-Atlas GCI Map",
+                    display_mode="ortho",
+                    colorbar=True
+                )
+                _save_display(display_gci, os.path.join(stage_pics_dir, f"Req3_InterGCI_{model_group}_Merged.pdf"))
+            else:
+                print(f"     ⚠️ 找不到 GCI 融合结果文件: {gci_nifti_path}")
 
-        # -----------------------------------------------------------------
-        # 需求 3: 跨分区、跨方法的全局一致性关键脑区 (Stage 2 GCI)
-        # -----------------------------------------------------------------
-        # GCI 图保存在第一个 atlas 的 pics 目录下
-        print(f"\n>>> 正在生成 [{model_group.upper()}] 跨图谱融合 (Stage 2 GCI)...")
-        gci_volume, confidence_volume = calculate_gci_and_confidence(all_gci_volumes)
-        gci_nifti = nib.Nifti1Image(gci_volume, reference_affine)
+            # 绘制 FWE 强统计推断核心脑图
+            if os.path.exists(fwe_nifti_path):
+                fwe_nifti = nib.load(fwe_nifti_path)
+                display_fwe = plot_stat_map(
+                    fwe_nifti,
+                    title=f"{model_group.capitalize()} FWE Corrected Core Regions (p<0.05)",
+                    display_mode="ortho",
+                    colorbar=True,
+                    cmap='hot'
+                )
+                _save_display(display_fwe, os.path.join(stage_pics_dir, f"Req4_FWECorrected_{model_group}_Merged.pdf"))
+            else:
+                print(f"     ⚠️ 找不到 FWE 校正结果文件: {fwe_nifti_path}")
 
-        # 保存到第一个 atlas 的 pics 目录
-        gci_pics_dir = os.path.join(BASE_DIR, ATLASES[0], "pics", TASK_NAME, "Stage_Results_Vis")
-
-        display_gci = plot_stat_map(
-            gci_nifti,
-            title=f"{model_group.capitalize()} Inter-Atlas GCI Map",
-            display_mode="ortho",
-            colorbar=True
-        )
-        _save_display(display_gci, os.path.join(gci_pics_dir, f"Req3_InterGCI_{model_group}_Merged.pdf"))
-
-        # -----------------------------------------------------------------
-        # 需求 4: 经过统计校正后的严谨解剖核心脑区 (Stage 3 FWE)
-        # -----------------------------------------------------------------
-        print(f">>> 正在执行 [{model_group.upper()}] 统计推断与 FWE 校正 (Stage 3)...")
-        null_distribution = mock_null_distribution(10000)
-
-        fwe_corrected_volume, report = cluster_level_fwe_correction(
-            real_gci_volume=gci_volume,
-            null_max_sizes=null_distribution,
-            primary_threshold=1.0,
-            p_val_thresh=0.05
-        )
-
-        fwe_nifti = nib.Nifti1Image(fwe_corrected_volume, reference_affine)
-
-        display_fwe = plot_stat_map(
-            fwe_nifti,
-            title=f"{model_group.capitalize()} FWE Corrected Core Regions (p<0.05)",
-            display_mode="ortho",
-            colorbar=True,
-            cmap='hot'
-        )
-        _save_display(display_fwe, os.path.join(gci_pics_dir, f"Req4_FWECorrected_{model_group}_Merged.pdf"))
-
-        print(f"✅ [{model_group.upper()}] 分支的所有 4 项可视化绘图已完美收官！")
+            print(f"✅ [{model_group.upper()}] 分支所有可用可视化绘图已完成！")
 
 if __name__ == "__main__":
-    main()
+    main(dataset_name='ABCD')
