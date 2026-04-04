@@ -28,6 +28,8 @@ def main(dataset_name=None):
     ATLASES = ['bna246', 'schaefer200_S1']
     ATLAS_DIR = "../../datasets/utils/mergedAtlas/Lin6/"
     MODEL_GROUPS = ['linear', 'nonlinear', 'mlp']
+    # 定义要分析的模态列表，ALL 代表跨模态混合（需求3、4）
+    MODALITIES = ['SC', 'FC','ALL']
 
     for TASK_NAME in tasks:
         # 【修改4】：跨图谱的公共结果保存在 Label 目录下专门的 Stage_Results 文件夹中
@@ -37,14 +39,16 @@ def main(dataset_name=None):
         # 【新增】：用于记录所有的 Dice 对齐分数
         dice_records = []
 
-        for model_group in MODEL_GROUPS:
-            print(f"\n{'='*60}")
-            print(f"=== 開始執行全流程計算分支: [{model_group.upper()}] ===")
-            print(f"{'='*60}")
+        # 外层模态循环
+        for modality in MODALITIES:
+            for model_group in MODEL_GROUPS:
+                print(f"\n{'='*60}")
+                print(f"=== 開始執行全流程計算分支: [Modality: {modality}] [{model_group.upper()}] ===")
+                print(f"{'='*60}")
 
-            all_volumes = []
-            reference_atlas_path = None
-            reference_affine = None
+                all_volumes = []
+                reference_atlas_path = None
+                reference_affine = None
 
             # ---------------- Stage 1 & 2 前期 ----------------
             for atlas_name in ATLASES:
@@ -57,6 +61,7 @@ def main(dataset_name=None):
 
                 # 【新增】：记录 Dice 分数
                 dice_records.append({
+                    "Modality": modality,
                     "Model_Group": model_group,
                     "Atlas": atlas_name, 
                     "Reference": ATLASES[0], 
@@ -67,21 +72,22 @@ def main(dataset_name=None):
                 atlas_stats_dir = os.path.join(BASE_DIR, atlas_name, "stats", TASK_NAME)
 
                 weight_matrix, file_names = load_model_weights(
-                    atlas_stats_dir, TASK_NAME, DATASET, atlas_name, model_group=model_group
+                    atlas_stats_dir, TASK_NAME, DATASET, atlas_name, model_group=model_group, modality=modality
                 )
 
                 if len(weight_matrix) == 0:
                     continue
 
-                print(f"     [Stage 1] 圖譜 {atlas_name}: 成功加載 {len(file_names)} 個 {model_group} 模型權重文件。")
+                print(f"     [Stage 1] 圖譜 {atlas_name} [Modality: {modality}]: 成功加載 {len(file_names)} 個 {model_group} 模型權重文件。")
 
                 rank_matrix = percentile_rank_transform(weight_matrix)
                 stability_scores = calculate_stability_score(rank_matrix)
                 nodal_strengths, _ = edge_to_node_mapping(stability_scores, threshold_percentile=0.95)
 
                 # 【修改3】：将 Connectome 级别和 ROI 级别的结果落盘为 .npy，方便后续 draw 画图
-                np.save(os.path.join(atlas_stats_dir, f"connectome_stability_{model_group}.npy"), stability_scores)
-                np.save(os.path.join(atlas_stats_dir, f"roi_strengths_{model_group}.npy"), nodal_strengths)
+                # 【修改】：文件名加上 modality 后缀，区分单模态与跨模态
+                np.save(os.path.join(atlas_stats_dir, f"connectome_stability_{model_group}_{modality}.npy"), stability_scores)
+                np.save(os.path.join(atlas_stats_dir, f"roi_strengths_{model_group}_{modality}.npy"), nodal_strengths)
                 print(f"     [Save] 已保存 {atlas_name} 的 Connectome 和 ROI 矩阵。")
 
                 volume_data, _ = project_to_voxel_space(nodal_strengths, aligned_atlas_img)
@@ -96,13 +102,14 @@ def main(dataset_name=None):
 
 
             
-            gci_nii_path = os.path.join(stage_out_dir, f'GCI_{DATASET}_{model_group}_Merged_{len(ATLASES)}Atlases.nii.gz')
+            # 【修改】：文件名加上 modality 后缀
+            gci_nii_path = os.path.join(stage_out_dir, f'GCI_{DATASET}_{model_group}_{modality}_Merged_{len(ATLASES)}Atlases.nii.gz')
             nib.save(nib.Nifti1Image(gci_volume, reference_affine), gci_nii_path)
             
             # 【新增】：额外保存一份 Numpy 矩阵版本的 GCI 和 Confidence，方便纯 Python 画 Heatmap
-            np.save(os.path.join(stage_out_dir, f'GCI_matrix_{model_group}.npy'), gci_volume)
-            np.save(os.path.join(stage_out_dir, f'Confidence_matrix_{model_group}.npy'), confidence_volume)
-            print(f"     [Stage 2] 跨圖譜融合完成，GCI/Confidence NIfTI與Numpy矩陣已保存。")
+            np.save(os.path.join(stage_out_dir, f'GCI_matrix_{model_group}_{modality}.npy'), gci_volume)
+            np.save(os.path.join(stage_out_dir, f'Confidence_matrix_{model_group}_{modality}.npy'), confidence_volume)
+            print(f"     [Stage 2] [Modality: {modality}] 跨圖譜融合完成，GCI/Confidence NIfTI與Numpy矩陣已保存。")
 
             # ---------------- Stage 3：統計推斷 ----------------
             null_distribution = mock_null_distribution()
@@ -113,11 +120,12 @@ def main(dataset_name=None):
                 p_val_thresh=0.05
             )
 
-            fwe_path = os.path.join(stage_out_dir, f'GCI_{DATASET}_{model_group}_FWECorrected.nii.gz')
+            # 【修改】：文件名加上 modality 后缀
+            fwe_path = os.path.join(stage_out_dir, f'GCI_{DATASET}_{model_group}_{modality}_FWECorrected.nii.gz')
             nib.save(nib.Nifti1Image(fwe_corrected_volume, reference_affine), fwe_path)
             # 【新增】：保存 FWE 统计校正报告
-            pd.DataFrame(report).to_csv(os.path.join(stage_out_dir, f'FWE_Report_{model_group}.csv'), index=False)
-            print(f"     [Stage 3] 統計校正完成，已保存 NIfTI 與 Report CSV。")
+            pd.DataFrame(report).to_csv(os.path.join(stage_out_dir, f'FWE_Report_{model_group}_{modality}.csv'), index=False)
+            print(f"     [Stage 3] [Modality: {modality}] 統計校正完成，已保存 NIfTI 與 Report CSV。")
 
         # 【修改5】：在最外层循环结束后，统一保存 Dice 分数文件
         if dice_records:
@@ -127,4 +135,5 @@ def main(dataset_name=None):
             print(f"✅ 全部分支執行完畢，圖譜對齊 Dice 分數已保存至: {dice_csv_path}")
 
 if __name__ == "__main__":
-    main(dataset_name='ABCD')
+    for dt in ['S1200', 'ABCD']:
+        main(dataset_name=dt)

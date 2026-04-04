@@ -4,13 +4,16 @@ import numpy as np
 import pandas as pd
 from scipy.stats import rankdata
 
-def load_model_weights(stats_dir, task, dataset, atlas, model_group='linear'):
+def load_model_weights(stats_dir, task, dataset, atlas, model_group='linear', modality='ALL'):
     """
     【最新修正版】：统一读取 Haufe/permutation 权重文件，并通过文件名中的 method 字段进行精确分组过滤。
 
     目录结构:
     - res_{dataset}/{atlas}/stats/{task}/haufe__label_{label}__dataset_*__atlas_*__modality_*__type_*.csv  (线性模型)
     - res_{dataset}/{atlas}/permutation/{task}/permutation__label_{label}__dataset_*__atlas_*__modality_*__type_*.csv  (非线性模型)
+    
+    参数:
+        modality: 模态过滤参数，'ALL' 表示所有模态，'SC'/'FC'/'SFCouple' 表示具体模态
     """
     # 定义严格的算法分组映射表
     group_mapping = {
@@ -27,16 +30,18 @@ def load_model_weights(stats_dir, task, dataset, atlas, model_group='linear'):
     # 新的目录结构: res_{dataset}/{atlas}/{type}/{task}/
     atlas_dir = os.path.join(stats_dir, "..")  # 回到 res_{dataset}/{atlas} 目录
 
+    # 处理模态通配符：'ALL' 时使用 '*'，否则使用具体模态名
+    modality_str = "*" if modality == 'ALL' else modality
+
     weights_list = []
     file_names = []
 
     # 线性模型使用 haufe 文件（在 stats 目录下）
-    # 匹配: haufe__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*.csv
+    # 匹配: haufe__label_{task}__dataset_*__atlas_{atlas}__modality_{modality_str}__type_*__method_*.csv
     if model_group == 'linear':
-        # 【修改这里】：去掉 os.path.join 中多余的 task 层级
         search_pattern = os.path.join(
             stats_dir,
-            f'haufe__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*__method_*.csv'
+            f'haufe__label_{task}__dataset_*__atlas_{atlas}__modality_{modality_str}__type_*__method_*.csv'
         )
         all_file_paths = glob.glob(search_pattern)
 
@@ -62,13 +67,12 @@ def load_model_weights(stats_dir, task, dataset, atlas, model_group='linear'):
                 file_names.append(fname)
 
     # 非线性模型使用 permutation 文件（在 permutation 目录下）
-    # 匹配: permutation__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*.csv
+    # 匹配: permutation__label_{task}__dataset_*__atlas_{atlas}__modality_{modality_str}__type_*__method_*.csv
     elif model_group in ('nonlinear', 'mlp'):
-        # 【修改这里】：去掉 os.path.join 中多余的 task 层级
         permutation_dir = os.path.join(stats_dir, "..", "permutation")
         search_pattern = os.path.join(
             permutation_dir,
-            f'permutation__label_{task}__dataset_*__atlas_{atlas}__modality_*__type_*__method_*.csv'
+            f'permutation__label_{task}__dataset_*__atlas_{atlas}__modality_{modality_str}__type_*__method_*.csv'
         )
         all_file_paths = glob.glob(search_pattern)
 
